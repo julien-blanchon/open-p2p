@@ -166,6 +166,8 @@ uv run elefant/policy_model/inference.py \
 Technically any hardware that can achieve end-to-end inference latency of **< 50 ms** should be sufficient. A detailed latency breakdown is provided by Recap after each inference session:
 ![Latency Analysis](assets/latency.png)
 
+> **Note**: @euminds experimented with Moonlight Streaming setup as an alternative to dual GPU setup, please checkout [Alternative](#moonlight) section.
+
 ### Prerequisites
 
 #### 1. Install NVIDIA GPU Driver
@@ -256,6 +258,28 @@ After stopping, a folder will open containing:
 > **How it works:** Recap captures screenshots from the selected window, sends frames to the inference server, receives predicted actions, and executes keyboard/mouse inputs in real time.
 
 ---
+<a id="moonlight"></a>
+#### Alternative Setup for Windows Inference: Streaming with Moonlight (Thanks to @euminds!)
+
+If you don't have two GPUs available, you can use **Moonlight streaming** to separate game rendering and model inference across two machines:
+
+**Architecture:**
+- **Game Machine**: Runs the game and streams via Sunshine (Moonlight server)
+- **Inference Machine**: Runs Recap (captures Moonlight window) + WSL (model inference)
+
+**Quick Setup:**
+
+1. **On Game Machine**: Install [Sunshine](https://github.com/LizardByte/Sunshine/releases) and configure it to stream your game
+2. **On Inference Machine**: Install [Moonlight client](https://moonlight-stream.org/downloads/) and connect to the game machine
+3. **Important**: Run Moonlight in **windowed mode** (not fullscreen) so Recap can capture it
+4. **In Recap**: Select the Moonlight window as the capture target
+
+**Requirements:**
+- Both machines must be on the **same local network (LAN)**
+- Use **wired network connection** for best results (lower latency)
+
+**Note**: Streaming adds network latency (typically 10-50ms). Wired connection is recommended to meet the < 50ms end-to-end latency requirement.
+
 
 ## Paper & Citation
 If you use the data or model in your research, please cite our paper:
