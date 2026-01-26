@@ -81,6 +81,16 @@ You can also specify a custom output directory with `--output`:
 uv run python scripts/download_data.py --output my_dataset
 ```
 
+### [Optional] Resize Videos for Training
+
+This step is **not required** if you plan to train the model at a resolution of 192×192 using the P2P dataset. However, it can be useful if you want to (1) resize videos to a different resolution, or (2) include additional videos in the dataset.
+
+To resize videos, edit the configuration file at `config/rescale/resize_192x192.yaml`. Set the `prefix` field to point to your local dataset, and update `frame_height` and `frame_width` to the desired resolution. Then run:
+
+```bash
+uv run elefant/data/rescale/main.py --config=config/rescale/resize_192x192.yaml
+```
+
 ### Training
 
 All dependencies are handled by `uv`.
