@@ -1,29 +1,11 @@
 """
-Example on how to run (Only need to indicate the checkpoint directory on r2):
-
-If you want to run the validation on already trained model:
-
-uv run elefant/policy_model/validation.py --checkpoint_dir policy/dev/6/stage3_finetune
-
-
-If you want to run the validation alongside training:
-
-uv run elefant/policy_model/validation.py \
-  --checkpoint_dir policy/dev/6/stage3_finetune \
-  --watch_for_checkpoints
-
-To restrict validation to a range of steps (inclusive):
-
-uv run elefant/policy_model/validation.py \
-  --checkpoint_dir policy/dev/6/stage3_finetune \
-  --min_steps 40000 \
-  --max_steps 100000
+example to run validation:
+uv run elefant/policy_model/validation.py --config=config/policy_model/150M.yaml --checkpoint_dir=checkpoints/150M
 """
 
 import re
 import argparse
 import os
-import fsspec
 import wandb
 import logging
 import shutil
@@ -33,7 +15,8 @@ import time
 from typing import Optional
 from datetime import datetime
 
-from elefant.policy_model.utils import load_config_from_checkpoint
+from elefant.config import load_config
+from elefant.policy_model.config import LightningPolicyConfig
 from elefant.policy_model.stage3_finetune import (
     Stage3DataModule,
     Stage3LabelledBCLightning,
@@ -73,46 +56,12 @@ def move_action_label_video_dataset_item_to_device(
 
 def find_all_checkpoints(path: str):
     if path.endswith(".ckpt"):
-        return [(path, datetime(1900, 1, 1).replace(tzinfo=None))]
+        return [path]
 
-    fs, root = fsspec.url_to_fs(path)
-    fs.invalidate_cache()
-    try:
-        entries = fs.ls(root, detail=True)
-    except FileNotFoundError:
+    if not os.path.isdir(path):
         return []
 
-    ckpt_entries = []
-    for e in entries:
-        name = e.get("name") or e.get("Key") or e.get("path")
-        if not name or not name.endswith(".ckpt"):
-            continue
-
-        proto = fs.protocol
-        if isinstance(proto, (list, tuple)):
-            proto = proto[0] if proto else None
-
-        if proto and proto != "file" and "://" not in name:
-            ckpt_path = f"{proto}://{name}"
-        else:
-            ckpt_path = name
-
-        try:
-            step = extract_step_from_checkpoint_path(ckpt_path)
-        except ValueError:
-            continue
-
-        last_modified = e.get("LastModified")
-        if hasattr(last_modified, "replace"):
-            last_modified = last_modified.replace(tzinfo=None)
-        else:
-            last_modified = datetime(1900, 1, 1).replace(tzinfo=None)
-
-        ckpt_entries.append((step, ckpt_path, last_modified))
-
-    # sort by step ascending
-    ckpt_entries.sort(key=lambda t: t[0])
-    return [(p, mtime) for _, p, mtime in ckpt_entries]
+    return [os.path.join(path, f) for f in os.listdir(path) if f.endswith(".ckpt")]
 
 
 def extract_step_from_checkpoint_path(checkpoint_path):
@@ -138,13 +87,13 @@ def set_validation_dataset_cfg_to_single_thread(validation_dataset_cfgs, batch_s
     return validation_dataset_cfgs
 
 
-def report_validation_metrics(checkpoint_path, global_step, run_id: str):
+def report_validation_metrics(checkpoint_path, config_path, global_step, run_id: str):
     BATCH_SIZE_FOR_VAL = 1
     t0 = time.time()
     checkpoint_path = checkpoint_path.replace("research-training-checkpoints/", "")
 
     try:
-        config = load_config_from_checkpoint(checkpoint_path)
+        config = load_config(config_path, LightningPolicyConfig)
         stage = os.path.basename(os.path.dirname(checkpoint_path))
         print(f"validating stage {stage}, run id {run_id}, global step {global_step}")
         wandb_kwargs = dict(
@@ -236,7 +185,11 @@ def report_validation_metrics(checkpoint_path, global_step, run_id: str):
                         masked_labels,
                         batch_to_cuda.text_embeddings,
                     )
-
+                if torch.isnan(loss):
+                    # this can be caused by the fact that all the masked_labels are -100
+                    # means no human actions in the batch (only system actions)
+                    # we skipped those examples in the validation
+                    continue
                 val_metrics["off_perplexity"].update(cross_entropy_to_perplexity(loss))
                 for k, v in losses.items():
                     if k == "rz_loss" or k == "lb_loss":
@@ -290,9 +243,9 @@ def is_step_in_range(
     return True
 
 
-def run_validation_or_watcher(
+def run_validation(
     checkpoint_dir: str,
-    watch_for_checkpoints: bool,
+    config_path: str,
     min_steps: Optional[int],
     max_steps: Optional[int],
 ):
@@ -300,65 +253,22 @@ def run_validation_or_watcher(
     Local execution path: run once or watch and run repeatedly
     """
     run_id = wandb.util.generate_id()
-    if watch_for_checkpoints:
-        # track which steps we've already validated during this run
-        processed_steps = set()
+    ckpts = find_all_checkpoints(checkpoint_dir)
+    if not ckpts:
+        logging.info(f"No checkpoints found in {checkpoint_dir}")
+    for checkpoint_path in ckpts:
+        try:
+            global_step = extract_step_from_checkpoint_path(checkpoint_path)
+        except ValueError:
+            logging.warning(
+                f"Skipping checkpoint with unparseable step: {checkpoint_path}"
+            )
+            continue
 
-        while True:
-            ckpts = find_all_checkpoints(checkpoint_dir)
-            if not ckpts:
-                logging.info("No checkpoints found, sleeping for 30 minutes")
-                time.sleep(1800)
-                continue
+        if not is_step_in_range(global_step, min_steps, max_steps):
+            continue
 
-            # filter for new steps in range (ascending order already guaranteed by find_all_checkpoints)
-            new_ckpts = []
-            for checkpoint_path, _ in ckpts:
-                try:
-                    step = extract_step_from_checkpoint_path(checkpoint_path)
-                except ValueError:
-                    continue
-                if step in processed_steps:
-                    continue
-                if not is_step_in_range(step, min_steps, max_steps):
-                    continue
-                new_ckpts.append((checkpoint_path, step))
-
-            if not new_ckpts:
-                if min_steps is not None or max_steps is not None:
-                    logging.info(
-                        "No new checkpoints found within the specified step range, sleeping for 30 minutes"
-                    )
-                else:
-                    logging.info("No new checkpoints found, sleeping for 10 minutes")
-                time.sleep(600)
-                continue
-
-            for checkpoint_path, global_step in new_ckpts:
-                checkpoint_parent = os.path.dirname(checkpoint_path)
-                report_validation_metrics(checkpoint_path, global_step, run_id)
-                logging.info(
-                    f"Validation metrics logged successfully for checkpoint {checkpoint_path}"
-                )
-                processed_steps.add(global_step)
-
-    else:
-        ckpts = find_all_checkpoints(checkpoint_dir)
-        if not ckpts:
-            logging.info(f"No checkpoints found in {checkpoint_dir}")
-        for checkpoint_path, _ in ckpts:
-            try:
-                global_step = extract_step_from_checkpoint_path(checkpoint_path)
-            except ValueError:
-                logging.warning(
-                    f"Skipping checkpoint with unparseable step: {checkpoint_path}"
-                )
-                continue
-
-            if not is_step_in_range(global_step, min_steps, max_steps):
-                continue
-
-            report_validation_metrics(checkpoint_path, global_step, run_id)
+        report_validation_metrics(checkpoint_path, config_path, global_step, run_id)
     logging.info("Validation metrics logged successfully.")
 
 
@@ -375,9 +285,10 @@ def main():
         help="Checkpoint dir (or single .ckpt) to validate",
     )
     parser.add_argument(
-        "--watch_for_checkpoints",
-        action="store_true",
-        help="Run in background and continuously monitor for new checkpoints",
+        "--config_path",
+        type=str,
+        required=True,
+        help="Config path",
     )
     parser.add_argument(
         "--min_steps",
@@ -398,9 +309,9 @@ def main():
         if args.min_steps > args.max_steps:
             parser.error("--min_steps must be <= --max_steps")
 
-    run_validation_or_watcher(
+    run_validation(
         checkpoint_dir=args.checkpoint_dir,
-        watch_for_checkpoints=args.watch_for_checkpoints,
+        config_path=args.config_path,
         min_steps=args.min_steps,
         max_steps=args.max_steps,
     )

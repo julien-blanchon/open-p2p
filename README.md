@@ -115,8 +115,10 @@ Training and validation are deliberately separated for stability. You *can* merg
 
 To run validation on all checkpoints in a directory:
 ```bash
-uv run elefant/policy_model/validation.py --checkpoint_dir <PATH_TO_CHECKPOINT_DIR>
+uv run elefant/policy_model/validation.py --checkpoint_dir=<PATH_TO_CHECKPOINT_DIR> --config_path=config/policy_model/<150M|300M|600M|1200M>.yaml
 ```
+
+[!IMPORTANT] Configuration Matching: The config must match the model size of your checkpoint. Do not use the config file bundled with the checkpoint download, as it is deprecated. Always use the updated versions found in `config/policy_model/`.
 
 Validation results (perplexity) are reported to **Weights & Biases**.
 
